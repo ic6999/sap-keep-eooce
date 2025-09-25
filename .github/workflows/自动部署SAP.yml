@@ -6,7 +6,7 @@ on:
       type:
         description: '选择部署的节点类型'
         required: true
-        default: 'Argo隧道CDN'
+        default: 'ws直连'
         type: choice
         options:
           - ws直连
@@ -15,7 +15,7 @@ on:
       region:
         description: '选择部署区域'
         required: true
-        default: 'US(free)'
+        default: 'SG(free)'
         type: choice
         options:
           #  免费区域
