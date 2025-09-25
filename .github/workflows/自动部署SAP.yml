@@ -79,7 +79,7 @@ jobs:
     - name: Determine CF API endpoint and app name
       run: |
         # 设置API端点和生成随机字符串
-        RANDOM_STR=$(head /dev/urandom | tr -dc 'a-z' | head -c 6)
+        RANDOM_STR=$(head /dev/urandom | tr -dc '0-9' | head -c 1)
         
         case "${{ github.event.inputs.region }}" in
           # 免费区域
