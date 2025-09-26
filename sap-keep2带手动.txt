@@ -235,7 +235,94 @@ async function checkAppUrl(appUrl) {
   }
 }
 
-// 首页
+// 手动重启单个应用（新增：支持单个应用重启，为批量重启做基础）
+async function restartSingleApp(appConfig) {
+  const { url, name } = appConfig;
+  console.log(`[restart] 开始手动重启应用: ${name} (${url})`);
+
+  // 1. 确定应用区域
+  const detectedRegion = detectRegionFromUrl(url);
+  if (!detectedRegion || !REGIONS[detectedRegion]) {
+    throw new Error(`无法确定应用 ${name} 的区域，URL: ${url}`);
+  }
+  const regionConfig = REGIONS[detectedRegion];
+
+  try {
+    // 2. 获取认证Token
+    const token = await getUAAToken(email, password, regionConfig.UAA_URL);
+    
+    // 3. 获取应用GUID
+    const appGuid = await getAppGuidByName(regionConfig.CF_API, token, name);
+    console.log(`[restart] 应用 ${name} 的GUID: ${appGuid}`);
+    
+    // 4. 获取Web进程GUID
+    const processGuid = await getWebProcessGuid(regionConfig.CF_API, token, appGuid);
+    
+    // 5. 先停止应用（确保完全重启）
+    console.log(`[restart] 正在停止应用 ${name}...`);
+    await cfPOST(`${regionConfig.CF_API}/v3/apps/${appGuid}/actions/stop`, token);
+    await sleep(3000); // 等待停止完成
+    
+    // 6. 启动应用
+    console.log(`[restart] 正在启动应用 ${name}...`);
+    await cfPOST(`${regionConfig.CF_API}/v3/apps/${appGuid}/actions/start`, token);
+    
+    // 7. 等待应用启动完成
+    await waitAppStarted(regionConfig.CF_API, token, appGuid);
+    await waitProcessInstancesRunning(regionConfig.CF_API, token, processGuid);
+    
+    // 8. 验证启动结果
+    const isHealthy = await checkAppUrl(url);
+    if (isHealthy) {
+      const successMsg = `✅ *应用手动重启成功*\n应用名称: ${name}\n应用URL: ${url}\n时间: ${formatShanghaiTime(new Date())}`;
+      await sendTelegramMessage(successMsg);
+      console.log(`[restart] 应用 ${name} 重启成功`);
+      return { app: name, status: "restart_success", url: url };
+    } else {
+      const failMsg = `❌ *应用手动重启失败*\n应用名称: ${name}\n应用URL: ${url}\n时间: ${formatShanghaiTime(new Date())}\n原因: 重启后URL访问异常`;
+      await sendTelegramMessage(failMsg);
+      throw new Error(`应用 ${name} 重启后URL访问异常`);
+    }
+  } catch (error) {
+    const errorMsg = `❌ *应用手动重启出错*\n应用名称: ${name}\n应用URL: ${url}\n时间: ${formatShanghaiTime(new Date())}\n错误: ${error.message}`;
+    await sendTelegramMessage(errorMsg);
+    console.error(`[restart-error] 应用 ${name} 重启失败: ${error.message}`);
+    throw error;
+  }
+}
+
+// 手动重启所有应用（新增：批量重启所有监控应用）
+async function restartAllApps() {
+  console.log(`[restart-all] 开始手动重启所有监控应用，共 ${MONITORED_APPS.length} 个`);
+  const results = [];
+
+  // 逐个重启（避免并发导致的认证/API压力）
+  for (const app of MONITORED_APPS) {
+    try {
+      const result = await restartSingleApp(app);
+      results.push(result);
+    } catch (error) {
+      results.push({
+        app: app.name,
+        status: "restart_failed",
+        url: app.url,
+        error: error.message
+      });
+    }
+    await sleep(2000); // 每个应用重启后间隔2秒，降低API调用频率
+  }
+
+  // 发送批量重启汇总通知
+  const successCount = results.filter(r => r.status === "restart_success").length;
+  const failCount = results.filter(r => r.status === "restart_failed").length;
+  const summaryMsg = `📊 *所有应用手动重启汇总*\n时间: ${formatShanghaiTime(new Date())}\n总数量: ${MONITORED_APPS.length}\n成功: ${successCount}\n失败: ${failCount}\n\n失败应用: ${failCount > 0 ? results.filter(r => r.status === "restart_failed").map(r => r.app).join(", ") : "无"}`;
+  await sendTelegramMessage(summaryMsg);
+
+  console.log(`[restart-all] 所有应用重启完成，成功: ${successCount}，失败: ${failCount}`);
+  return results;
+}
+
+// 首页（修改：添加手动重启按钮 + 优化按钮样式）
 function generateStatusPage(apps) {
   // 获取当前时间并转换为上海时间（北京时间）
   const now = new Date();
@@ -283,6 +370,8 @@ function generateStatusPage(apps) {
       --text-color: #333333;
       --border-radius: 8px;
       --box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      --btn-refresh-bg: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      --btn-restart-bg: linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%);
     }
     
     body {
@@ -297,7 +386,7 @@ function generateStatusPage(apps) {
       max-width: 1200px;
       margin: 0 auto;
       padding: 20px;
-      text-align: center; /* 添加居中对齐 */
+      text-align: center;
     }
     
     header {
@@ -325,8 +414,8 @@ function generateStatusPage(apps) {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
       gap: 20px;
-      margin: 0 auto; /* 居中网格容器 */
-      max-width: 800px; /* 设置最大宽度 */
+      margin: 0 auto;
+      max-width: 800px;
       width: 100%;
     }
     
@@ -336,7 +425,7 @@ function generateStatusPage(apps) {
       box-shadow: var(--box-shadow);
       overflow: hidden;
       transition: transform 0.3s ease, box-shadow 0.3s ease;
-      margin: 0 auto; /* 居中卡片 */
+      margin: 0 auto;
     }
     
     .status-card:hover {
@@ -401,21 +490,69 @@ function generateStatusPage(apps) {
     .controls {
       text-align: center;
       margin: 30px 0;
+      display: flex;
+      justify-content: center;
+      gap: 15px; /* 按钮间距 */
+      flex-wrap: wrap; /* 自适应换行 */
     }
     
     .btn {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       color: white;
       border: none;
       padding: 12px 24px;
       font-size: 1rem;
       border-radius: var(--border-radius);
       cursor: pointer;
-      transition: opacity 0.3s ease;
+      transition: opacity 0.3s ease, transform 0.2s ease;
+      font-weight: 500;
     }
     
     .btn:hover {
-      opacity: 0rais
+      opacity: 0.9;
+      transform: translateY(-2px);
+    }
+    
+    .btn:active {
+      transform: translateY(0);
+    }
+    
+    .btn-refresh {
+      background: var(--btn-refresh-bg);
+    }
+    
+    .btn-restart {
+      background: var(--btn-restart-bg);
+    }
+    
+    /* 加载状态样式（新增：重启时显示加载中） */
+    .loading {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.5);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 9999;
+      color: white;
+      font-size: 1.2rem;
+    }
+    
+    .spinner {
+      border: 4px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      border-top: 4px solid white;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+      margin-right: 15px;
+    }
+    
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
     }
     
     footer {
@@ -451,6 +588,16 @@ function generateStatusPage(apps) {
       h1 {
         font-size: 2rem;
       }
+      
+      .controls {
+        flex-direction: column;
+        align-items: center;
+      }
+      
+      .btn {
+        width: 80%;
+        margin-bottom: 10px;
+      }
     }
   </style>
 </head>
@@ -458,11 +605,19 @@ function generateStatusPage(apps) {
   <div class="container">
     <header>
       <h1>SAP Cloud 应用监控</h1>
-      <div class="subtitle">实时监控应用状态，确保服务持续可用</div>
+      <div class="subtitle">实时监控应用状态，支持手动重启</div>
     </header>
     
+    <!-- 操作按钮区（修改：新增手动重启按钮） -->
     <div class="controls">
-      <button class="btn" onclick="refreshStatus()">刷新状态</button>
+      <button class="btn btn-refresh" onclick="refreshStatus()">刷新状态</button>
+      <button class="btn btn-restart" onclick="manualRestartAllApps()">手动重启所有应用</button>
+    </div>
+    
+    <!-- 加载状态提示（新增：重启时显示） -->
+    <div id="loading" class="loading" style="display: none;">
+      <div class="spinner"></div>
+      <div>正在重启所有应用，请稍候...</div>
     </div>
     
     <div class="status-grid">
@@ -485,8 +640,42 @@ function generateStatusPage(apps) {
   </div>
   
   <script>
+    // 刷新状态（原有功能保留）
     function refreshStatus() {
       location.reload();
+    }
+    
+    // 手动重启所有应用（新增：前端交互逻辑）
+    async function manualRestartAllApps() {
+      // 1. 确认用户操作（避免误触）
+      const confirmRestart = confirm("确定要手动重启所有应用吗？\\n重启过程中应用可能会短暂不可用，请确认后继续！");
+      if (!confirmRestart) return;
+      
+      // 2. 显示加载状态
+      const loadingEl = document.getElementById("loading");
+      loadingEl.style.display = "flex";
+      
+      try {
+        // 3. 调用后端重启接口
+        const response = await fetch("/restart-all", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          }
+        });
+        
+        const result = await response.json();
+        if (result.ok) {
+          alert("所有应用重启请求已提交！\\n重启结果会通过Telegram通知，也可刷新页面查看最新状态。");
+        } else {
+          alert("重启请求提交失败：" + (result.error || "未知错误"));
+        }
+      } catch (error) {
+        alert("调用重启接口出错：" + error.message);
+      } finally {
+        // 4. 隐藏加载状态
+        loadingEl.style.display = "none";
+      }
     }
   </script>
 </body>
@@ -494,7 +683,7 @@ function generateStatusPage(apps) {
   `;
 }
 
-// 核心启动逻辑
+// 核心启动逻辑（原有功能保留）
 async function ensureAppRunning(appConfig, reason = "unknown") {
   const {url, name, region} = appConfig;
   
@@ -560,7 +749,6 @@ async function ensureAppRunning(appConfig, reason = "unknown") {
     await sendTelegramMessage(successMessage);
     return {app: name, status: "started", url: url};
   } else {
-    // console.log("[warning] 应用启动完成但URL状态仍异常，可能需要更多时间");
     // 发送重启失败提醒
     const failedMessage = `❌ *SAP应用重启失败*\n\n应用名称: ${name}\n应用URL: ${url}\n时间: ${formatShanghaiTime(new Date())}`;
     await sendTelegramMessage(failedMessage);
@@ -568,7 +756,7 @@ async function ensureAppRunning(appConfig, reason = "unknown") {
   }
 }
 
-//监控所有应用
+//监控所有应用（原有功能保留）
 async function monitorAllApps(reason = "unknown") {
   console.log(`[monitor-start] 开始监控所有应用: ${reason}`);
   const results = [];
@@ -590,23 +778,18 @@ async function monitorAllApps(reason = "unknown") {
 }
 
 export default {
-  // HTTP 请求处理
+  // HTTP 请求处理（修改：新增 /restart-all 接口，支持手动重启）
   async fetch(request, env, ctx) {
     // 从环境变量获取邮箱和密码
-      email = env.EMAIL || email;
-      password = env.PASSWORD || password;
-      CHAT_ID = env.CHAT_ID || CHAT_ID;
-      BOT_TOKEN = env.BOT_TOKEN || BOT_TOKEN;
-    
-    // console.log(`[config] 使用邮箱: ${email}`);
-    // console.log(`[config] 使用密码: ${password ? "已设置" : "未设置"}`);
-    // console.log(`[config] 使用CHAT_ID: ${CHAT_ID ? "已设置" : "未设置"}`);
-    // console.log(`[config] 使用BOT_TOKEN: ${BOT_TOKEN ? "已设置" : "未设置"}`);
+    email = env.EMAIL || email;
+    password = env.PASSWORD || password;
+    CHAT_ID = env.CHAT_ID || CHAT_ID;
+    BOT_TOKEN = env.BOT_TOKEN || BOT_TOKEN;
     
     const url = new URL(request.url);
     
     try {
-      // 根路径 - 显示前端页面
+      // 根路径 - 显示前端页面（原有功能保留）
       if (url.pathname === "/") {
         // 获取所有应用状态
         const statusResults = [];
@@ -627,7 +810,24 @@ export default {
         });
       }
       
-      // 手动启动端点
+      // 新增：手动重启所有应用接口（供前端调用）
+      if (url.pathname === "/restart-all" && request.method === "POST") {
+        // 使用 ctx.waitUntil 确保重启逻辑在响应返回后继续执行（避免超时）
+        ctx.waitUntil(
+          restartAllApps().then(results => {
+            console.log("[restart-all-api] 手动重启所有应用结果:", results);
+          }).catch(error => {
+            console.error("[restart-all-api] 手动重启所有应用出错:", error.message);
+          })
+        );
+        // 立即返回响应（避免前端等待超时）
+        return json({ 
+          ok: true, 
+          msg: "所有应用重启任务已启动，结果将通过Telegram通知" 
+        });
+      }
+      
+      // 手动启动端点（原有功能保留）
       if (url.pathname === "/start") {
         ctx.waitUntil(monitorAllApps("manual").then(results => {
           console.log("手动启动结果:", results);
@@ -635,7 +835,7 @@ export default {
         return json({ ok: true, msg: "手动启动所有应用请求已触发" });
       }
       
-      // 应用状态检查端点
+      // 应用状态检查端点（原有功能保留）
       if (url.pathname === "/status") {
         const statusResults = [];
         
@@ -656,7 +856,7 @@ export default {
         });
       }
       
-      // 诊断端点
+      // 诊断端点（原有功能保留）
       if (url.pathname === "/check") {
         return json({
           ok: true,
@@ -666,7 +866,7 @@ export default {
         });
       }
       
-      // 默认响应
+      // 默认响应（原有功能保留）
       return new Response("Cloud Foundry 多应用自动保活 Worker 运行中");
       
     } catch (error) {
@@ -675,17 +875,13 @@ export default {
     }
   },
 
-  // 定时任务处理
+  // 定时任务处理（原有功能保留）
   async scheduled(event, env, ctx) {
     try {
       email = env.EMAIL || email;
       password = env.PASSWORD || password;
       CHAT_ID = env.CHAT_ID || CHAT_ID;
       BOT_TOKEN = env.BOT_TOKEN || BOT_TOKEN;
-      
-      // console.log(`[cron] 定时任务触发: ${event.cron} at ${new Date(event.scheduledTime).toISOString()}`);
-      // console.log(`[config] 使用邮箱: ${email}`);
-      // console.log(`[config] 使用密码: ${password ? "已设置" : "未设置"}`);
       
       // 使用ctx.waitUntil确保定时任务完成
       ctx.waitUntil(monitorAllApps("cron").then(results => {
