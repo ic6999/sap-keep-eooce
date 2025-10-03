@@ -471,8 +471,8 @@ function generateStatusPage(appsByRegion, lastUpdateTime) {
       if (app.lastRestart) {
         restartHtml = `
           <p class="restart-record">
-            <strong>最后重启:</strong> ${app.lastRestart.time}<br>
-            <strong>操作者:</strong> ${app.lastRestart.operator === "system" ? "系统(定时)" : "用户(手动)"}
+          🔄${app.lastRestart.time}
+          💡by ${app.lastRestart.operator === "system" ? "cron" : "user"}
           </p>
         `;
       }
@@ -497,7 +497,7 @@ function generateStatusPage(appsByRegion, lastUpdateTime) {
             <span class="status-badge ${statusClass}">${statusText}</span>
           </div>
           <div class="card-body">
-            <p><strong>URL:</strong> <a href="${app.url}" target="_blank" rel="noopener">${truncateUrl(app.url)}</a></p>
+            <p><strong>URL:</strong> <a href="${app.url}/sub" target="_blank" rel="noopener">${truncateUrl(app.url)}</a></p>
             ${restartHtml}
             ${circuitHtml}
           </div>
