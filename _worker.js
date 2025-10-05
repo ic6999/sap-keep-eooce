@@ -1,3 +1,4 @@
+//部署成功后添加触发事件，添加cron设置：*/2 0 * * *
 // 环境变量配置(必填)
 let email = "antidanatoritania@gmail.com";      // SAP登录邮箱,直接填写或设置环境变量，变量名：EMAIL
 let password = "Hh090909";   // SAP登录密码,直接填写或设置环境变量，变量名：PASSWORD
